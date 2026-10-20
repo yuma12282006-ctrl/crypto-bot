@@ -1,7 +1,9 @@
 import os
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime
+from sklearn.linear_model import LogisticRegression
 
 # GitHub Secretsから安全にDiscordのWebhook URLを読み込む
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -19,9 +21,10 @@ SYMBOLS = [
 ]
 
 def get_crypto_data(symbol):
-    """Yahoo Financeからデータを取得する（鉄壁エラーガード付き）"""
+    """Yahoo Financeからデータを取得し、AIで翌日の上昇確率を予測する"""
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=30d"
+        # 機械学習の学習用に少し長めのデータ（60日分）を取得
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=60d"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         
@@ -36,7 +39,7 @@ def get_crypto_data(symbol):
         df = pd.DataFrame({'Close': prices})
         df = df.dropna()
         
-        if len(df) < 20:
+        if len(df) < 30:
             print(f"[{symbol}] データ件数が不足しています")
             return None
 
@@ -49,6 +52,31 @@ def get_crypto_data(symbol):
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
         
+        # AI（機械学習）用の特徴量作成
+        df['Return'] = df['Close'].pct_change()
+        df['SMA_Diff'] = (df['Close'] - df['SMA20']) / df['SMA20']
+        
+        # 正解ラベル（翌日の終値が上がっていれば1、下がっていれば0）
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+        
+        df = df.dropna()
+        
+        if len(df) < 15:
+            return None
+
+        # 特徴量（RSI、騰落率、SMA乖離率）とターゲットの分割
+        features = ['RSI', 'Return', 'SMA_Diff']
+        X = df[features].iloc[:-1] # 最新の足以外を学習データにする
+        y = df['Target'].iloc[:-1]
+
+        # AIモデル（ロジスティック回帰）の学習
+        model = LogisticRegression()
+        model.fit(X, y)
+
+        # 最新のデータで「明日上がる確率」を予測
+        latest_X = df[features].iloc[[-1]]
+        prob_up = model.predict_proba(latest_X)[0][1] * 100 # 上昇確率（%）
+
         current_price = df['Close'].iloc[-1]
         sma20 = df['SMA20'].iloc[-1]
         rsi = df['RSI'].iloc[-1]
@@ -57,7 +85,8 @@ def get_crypto_data(symbol):
             "symbol": symbol,
             "price": round(current_price, 2),
             "sma20": round(sma20, 2),
-            "rsi": round(rsi, 1)
+            "rsi": round(rsi, 1),
+            "ai_prob": round(prob_up, 1)
         }
         
     except Exception as e:
@@ -65,7 +94,7 @@ def get_crypto_data(symbol):
         return None
 
 def analyze_and_notify():
-    """データを解析し、デモトレードの売買判定を行ってDiscordに通知する"""
+    """データを解析し、AI予測とデモトレード判定を行ってDiscordに通知する"""
     embeds = []
     
     for symbol in SYMBOLS:
@@ -76,30 +105,31 @@ def analyze_and_notify():
         price = data["price"]
         sma20 = data["sma20"]
         rsi = data["rsi"]
+        ai_prob = data["ai_prob"]
         
-        # デモトレード（仮想売買）の判定ロジック
-        if rsi <= 30:
-            signal = "📉 【買いシグナル】"
-            trade_action = "🤖 【デモ発動】売られすぎ圏のため、仮想買い注文を実行！"
+        # AI予測確率とRSIを組み合わせた高度な判定ロジック
+        if ai_prob >= 60.0 and rsi <= 40:
+            signal = f"🤖🚀 【AI強気買いシグナル】"
+            trade_action = f"AI上昇予測 {ai_prob}% ＆ 売られすぎ圏のため、仮想買い注文！"
             color = 3066993  # 緑色
-        elif rsi >= 70:
-            signal = "📈 【売り警戒】"
-            trade_action = "🤖 【デモ発動】買われすぎ圏のため、仮想利食い売りを実行！"
+        elif ai_prob <= 40.0 or rsi >= 70:
+            signal = f"🤖⚠️ 【AI売り警戒・様子見】"
+            trade_action = f"AI上昇予測低下 ({ai_prob}%) のため、ポジション調整・様子見"
             color = 15158332 # 赤色
         else:
-            signal = "⚖️ 【中立・様子見】"
-            trade_action = "💤 ポジション維持（売買なし）"
+            signal = f"🤖⚖️ 【AI中立・様子見】"
+            trade_action = f"AI上昇予測 {ai_prob}%（明確なシグナルなし）"
             color = 3447003  # 青色
 
-        # Discordの埋め込みメッセージ（Embed）構築
+        # Discordの埋め込みメッセージ構築
         embed = {
-            "title": f"🤖 デモトレード判定: {symbol}",
+            "title": f"🧠 AI予測相場判定: {symbol}",
             "color": color,
             "fields": [
-                {"name": "売買シグナル", "value": signal, "inline": False},
+                {"name": "AI判定シグナル", "value": signal, "inline": False},
                 {"name": "自動売買アクション", "value": trade_action, "inline": False},
                 {"name": "現在価格", "value": f"${price:,.2f}", "inline": True},
-                {"name": "SMA20", "value": f"${sma20:,.2f}", "inline": True},
+                {"name": "AI上昇予測", "value": f"{ai_prob}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True}
             ],
             "footer": {"text": f"実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
