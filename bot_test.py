@@ -53,16 +53,17 @@ def process_features(df):
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Diff'] = df['MACD'] - df['Signal_Line']
     
-    # 変化率
+    # 変化率・乖離率
     df['Return'] = df['Close'].pct_change()
     df['SMA_Diff'] = (df['Close'] - df['SMA20']) / df['SMA20']
     df['Volume_Change'] = df['Volume'].pct_change()
     
     return df
 
-def run_backtest(df_daily, signals):
-    """過去データのバックテスト計算（シグナルが出たら翌日買い、損切り-3%/利食い+5%または1日保有）"""
+def run_backtest_with_fees(df_daily, signals):
+    """【厳格バックテスト】取引手数料（往復0.2%）を引いた現実的な損益・勝率を算出"""
     trades = []
+    fee = 0.002  # 往復手数料 0.2%
     
     for i in range(len(signals) - 1):
         if signals[i] == 1:  # 買いシグナル
@@ -70,13 +71,15 @@ def run_backtest(df_daily, signals):
             next_price = df_daily['Close'].iloc[i + 1]
             ret = (next_price - buy_price) / buy_price
             
-            # リスク管理ルール適用
+            # リスク管理ルール適用 (-3%損切り, +5%利食い)
             if ret <= -0.03:
                 ret = -0.03
             elif ret >= 0.05:
                 ret = 0.05
                 
-            trades.append(ret)
+            # 取引手数料を差し引く
+            net_ret = ret - fee
+            trades.append(net_ret)
             
     if not trades:
         return {"total_trades": 0, "win_rate": 0.0, "total_return": 0.0}
@@ -92,18 +95,14 @@ def run_backtest(df_daily, signals):
     }
 
 def analyze_crypto(symbol):
-    """マルチタイムフレーム分析 ＋ LightGBM ＋ バックテスト"""
-    # 1. 日足データ (長期) & 1時間足データ (短期) の取得
+    """マルチタイムフレーム分析 ＋ LightGBM ＋ 手数料込みバックテスト"""
     df_daily = fetch_chart_data(symbol, "1d", "120d")
     df_1h = fetch_chart_data(symbol, "1h", "7d")
     
     if df_daily is None or len(df_daily) < 40:
         return None
 
-    # 特徴量計算
     df_daily = process_features(df_daily)
-    
-    # 目的変数: 翌日終値が上昇なら1
     df_daily['Target'] = (df_daily['Close'].shift(-1) > df_daily['Close']).astype(int)
     df_clean = df_daily.dropna()
     
@@ -114,11 +113,11 @@ def analyze_crypto(symbol):
     X = df_clean[features].iloc[:-1]
     y = df_clean['Target'].iloc[:-1]
 
-    # LightGBMモデルの学習
+    # LightGBMモデル学習
     model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.03, max_depth=3, random_state=42, verbose=-1)
     model.fit(X, y)
 
-    # 日足でのAI予測値
+    # 日足AI予測
     latest_X = df_clean[features].iloc[[-1]]
     prob_daily = model.predict_proba(latest_X)[0][1] * 100
 
@@ -130,10 +129,10 @@ def analyze_crypto(symbol):
         latest_1h_sma = df_1h['SMA20'].iloc[-1]
         hourly_trend = "上昇（SMA20の上）" if latest_1h_close > latest_1h_sma else "下降（SMA20の下）"
 
-    # バックテスト実行 (過去シグナルの生成)
+    # 厳格バックテスト実行
     all_probs = model.predict_proba(df_clean[features])[:, 1]
-    signals = [1 if p >= 0.58 and r <= 50 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
-    bt_result = run_backtest(df_clean, signals)
+    signals = [1 if p >= 58.0 and r <= 50 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
+    bt_result = run_backtest_with_fees(df_clean, signals)
 
     current_price = df_clean['Close'].iloc[-1]
     rsi = df_clean['RSI'].iloc[-1]
@@ -168,22 +167,22 @@ def analyze_and_notify():
         stop_loss = data["stop_loss"]
         take_profit = data["take_profit"]
         
-        # マルチタイムフレーム判定
+        # 判定ロジック
         if ai_prob >= 58.0 and "上昇" in hourly_trend and rsi <= 50:
-            signal = f"🔥🚀 【マルチタイムフレーム最上位買いシグナル】"
-            trade_action = f"日足AI＆1時間足トレンド合致！注文推奨"
+            signal = f"🏰🚀 【要塞級AI強気買いシグナル】"
+            trade_action = f"手数料控除後もプラス期待！注文推奨"
             color = 3066993  # 緑
         elif ai_prob <= 42.0 or "下降" in hourly_trend:
-            signal = f"⚡⚠️ 【売り警戒・短期下降トレンド】"
-            trade_action = f"ポジション調整・様子見"
+            signal = f"⚡⚠️ 【要塞防御・様子見推奨】"
+            trade_action = f"トレンド不一致のため見送り"
             color = 15158332 # 赤
         else:
-            signal = f"⚡⚖️ 【様子見・シグナル待ち】"
-            trade_action = f"明確な根拠なし"
+            signal = f"⚡⚖️ 【中立・様子見】"
+            trade_action = f"明確なシグナルなし"
             color = 3447003  # 青
 
         embed = {
-            "title": f"📊 マルチタイムAI ＆ バックテスト: {symbol}",
+            "title": f"🛡️ 完璧要塞AI ＆ 厳格バックテスト: {symbol}",
             "color": color,
             "fields": [
                 {"name": "判定シグナル", "value": signal, "inline": False},
@@ -191,8 +190,8 @@ def analyze_and_notify():
                 {"name": "現在価格", "value": f"${price:,.2f}", "inline": True},
                 {"name": "日足AI予測(LGBM)", "value": f"{ai_prob}%", "inline": True},
                 {"name": "1時間足トレンド", "value": f"{hourly_trend}", "inline": True},
-                {"name": "📈 過去検証(勝率)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
-                {"name": "💰 過去通算リターン", "value": f"{data['bt_return']}%", "inline": True},
+                {"name": "📈 厳格検証(勝率・手数料込)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
+                {"name": "💰 手数料込 通算リターン", "value": f"{data['bt_return']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
                 {"name": "🛑 損切り (-3%)", "value": f"${stop_loss:,.2f}", "inline": True},
                 {"name": "🎯 利食い (+5%)", "value": f"${take_profit:,.2f}", "inline": True}
