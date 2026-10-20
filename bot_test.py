@@ -8,7 +8,7 @@ from datetime import datetime
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 # 監視銘柄（お好みで追加・変更可能）
-SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD"]
+SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD","BNB-USD","ADA-USD","AVAX-USD"]
 
 def get_crypto_data(symbol):
     """Yahoo Financeからデータを取得する（鉄壁エラーガード付き）"""
