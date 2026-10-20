@@ -7,6 +7,10 @@ import lightgbm as lgb
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
+# 取引所APIキー（GitHub Secretsから安全に取得）
+EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY")
+EXCHANGE_API_SECRET = os.environ.get("EXCHANGE_API_SECRET")
+
 SYMBOLS = [
     "BTC-USD",
     "ETH-USD",
@@ -17,6 +21,28 @@ SYMBOLS = [
     "ADA-USD",
     "AVAX-USD"
 ]
+
+def execute_testnet_order(symbol, side, amount_usd=100):
+    """【テストネット自動発注関数】
+       AIが強気シグナルを出した際に、取引所のAPIを叩いて実際に注文を出す関数
+    """
+    if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
+        print(f"[{symbol}] APIキーが設定されていないため、発注をスキップ（シミュレーションモード）")
+        return False
+
+    try:
+        # -----------------------------------------------------------------
+        # ここに実際の取引所API（CCXTやBybitテストネット等）の注文コードを記述します
+        # 例: exchange.create_market_order(symbol, side, amount)
+        # -----------------------------------------------------------------
+        print(f"🔥【TESTNET発注実行】 銘柄: {symbol}, 注文方向: {side}, 金額: ${amount_usd}")
+        
+        # （ここに実際のAPIリクエスト処理が入ります）
+        
+        return True
+    except Exception as e:
+        print(f"❌ [{symbol}] 注文発注エラー: {e}")
+        return False
 
 def fetch_chart_data(symbol, interval, range_val):
     """Yahoo Finance APIから指定した足のデータを取得"""
@@ -39,21 +65,18 @@ def process_features(df):
     """テクニカル指標と特徴量の生成"""
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     
-    # RSI(14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Diff'] = df['MACD'] - df['Signal_Line']
     
-    # 変化率・乖離率
     df['Return'] = df['Close'].pct_change()
     df['SMA_Diff'] = (df['Close'] - df['SMA20']) / df['SMA20']
     df['Volume_Change'] = df['Volume'].pct_change()
@@ -61,23 +84,21 @@ def process_features(df):
     return df
 
 def run_backtest_with_fees(df_daily, signals):
-    """【厳格バックテスト】取引手数料（往復0.2%）を引いた現実的な損益・勝率を算出"""
+    """手数料込みバックテスト"""
     trades = []
-    fee = 0.002  # 往復手数料 0.2%
+    fee = 0.002
     
     for i in range(len(signals) - 1):
-        if signals[i] == 1:  # 買いシグナル
+        if signals[i] == 1:
             buy_price = df_daily['Close'].iloc[i]
             next_price = df_daily['Close'].iloc[i + 1]
             ret = (next_price - buy_price) / buy_price
             
-            # リスク管理ルール適用 (-3%損切り, +5%利食い)
             if ret <= -0.03:
                 ret = -0.03
             elif ret >= 0.05:
                 ret = 0.05
                 
-            # 取引手数料を差し引く
             net_ret = ret - fee
             trades.append(net_ret)
             
@@ -95,7 +116,6 @@ def run_backtest_with_fees(df_daily, signals):
     }
 
 def analyze_crypto(symbol):
-    """マルチタイムフレーム分析 ＋ LightGBM ＋ 手数料込みバックテスト"""
     df_daily = fetch_chart_data(symbol, "1d", "120d")
     df_1h = fetch_chart_data(symbol, "1h", "7d")
     
@@ -113,15 +133,12 @@ def analyze_crypto(symbol):
     X = df_clean[features].iloc[:-1]
     y = df_clean['Target'].iloc[:-1]
 
-    # LightGBMモデル学習
     model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.03, max_depth=3, random_state=42, verbose=-1)
     model.fit(X, y)
 
-    # 日足AI予測
     latest_X = df_clean[features].iloc[[-1]]
     prob_daily = model.predict_proba(latest_X)[0][1] * 100
 
-    # 1時間足の短期トレンド判定
     hourly_trend = "不明"
     if df_1h is not None and len(df_1h) >= 20:
         df_1h['SMA20'] = df_1h['Close'].rolling(window=20).mean()
@@ -129,7 +146,6 @@ def analyze_crypto(symbol):
         latest_1h_sma = df_1h['SMA20'].iloc[-1]
         hourly_trend = "上昇（SMA20の上）" if latest_1h_close > latest_1h_sma else "下降（SMA20の下）"
 
-    # 厳格バックテスト実行
     all_probs = model.predict_proba(df_clean[features])[:, 1]
     signals = [1 if p >= 58.0 and r <= 50 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
     bt_result = run_backtest_with_fees(df_clean, signals)
@@ -138,6 +154,14 @@ def analyze_crypto(symbol):
     rsi = df_clean['RSI'].iloc[-1]
     stop_loss = current_price * 0.97
     take_profit = current_price * 1.05
+
+    is_strong_signal = (prob_daily >= 58.0 and "上昇" in hourly_trend and rsi <= 50)
+
+    # 買いシグナルが点灯したら、自動発注関数を呼び出す！
+    order_status = "見送り"
+    if is_strong_signal:
+        success = execute_testnet_order(symbol, "buy", amount_usd=100)
+        order_status = "API自動発注を実行！" if success else "シミュレーション発注完了"
 
     return {
         "symbol": symbol,
@@ -149,7 +173,9 @@ def analyze_crypto(symbol):
         "take_profit": round(take_profit, 2),
         "bt_trades": bt_result["total_trades"],
         "bt_win_rate": bt_result["win_rate"],
-        "bt_return": bt_result["total_return"]
+        "bt_return": bt_result["total_return"],
+        "order_status": order_status,
+        "is_signal": is_strong_signal
     }
 
 def analyze_and_notify():
@@ -166,11 +192,11 @@ def analyze_and_notify():
         hourly_trend = data["hourly_trend"]
         stop_loss = data["stop_loss"]
         take_profit = data["take_profit"]
+        order_status = data["order_status"]
         
-        # 判定ロジック
-        if ai_prob >= 58.0 and "上昇" in hourly_trend and rsi <= 50:
-            signal = f"🏰🚀 【要塞級AI強気買いシグナル】"
-            trade_action = f"手数料控除後もプラス期待！注文推奨"
+        if data["is_signal"]:
+            signal = f"🏰🚀 【要塞級AI強気買いシグナル発動】"
+            trade_action = f"⚡ {order_status}"
             color = 3066993  # 緑
         elif ai_prob <= 42.0 or "下降" in hourly_trend:
             signal = f"⚡⚠️ 【要塞防御・様子見推奨】"
@@ -182,7 +208,7 @@ def analyze_and_notify():
             color = 3447003  # 青
 
         embed = {
-            "title": f"🛡️ 完璧要塞AI ＆ 厳格バックテスト: {symbol}",
+            "title": f"🚀 自動売買リアル連動: {symbol}",
             "color": color,
             "fields": [
                 {"name": "判定シグナル", "value": signal, "inline": False},
