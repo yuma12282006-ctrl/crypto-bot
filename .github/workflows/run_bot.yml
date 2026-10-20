@@ -1,10 +1,9 @@
-name: Run Crypto Bot Daily
+name: Run Crypto Bot
 
 on:
   schedule:
-    # 毎日日本時間の朝8:00 (UTC 23:00) に自動実行
-    - cron: '0 23 * * *'
-  workflow_dispatch: # 手動実行用ボタン
+    - cron: '0 23 * * *'  # 毎日日本時間8:00 (UTC 23:00) に実行
+  workflow_dispatch:      # 手動実行ボタンを有効化
 
 jobs:
   run-bot:
@@ -21,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas numpy
+          pip install requests pandas numpy scikit-learn
 
       - name: Run bot script
         env:
