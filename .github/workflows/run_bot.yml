@@ -2,7 +2,7 @@ name: Run Crypto Bot
 
 on:
   schedule:
-    - cron: '0 23 * * *'  # 毎日日本時間8:00 (UTC 23:00) に実行
+    - cron: '0 * * * *'  # 毎日日本時間8:00 (UTC 23:00) に実行
   workflow_dispatch:      # 手動実行ボタンを有効化
 
 jobs:
