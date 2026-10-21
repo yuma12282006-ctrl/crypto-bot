@@ -6,6 +6,7 @@ from datetime import datetime
 import lightgbm as lgb
 import ccxt
 import traceback
+import subprocess
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 LINE_NOTIFY_TOKEN = os.environ.get("LINE_NOTIFY_TOKEN")
@@ -174,7 +175,6 @@ def process_features(df):
     return df
 
 def run_backtest_with_trailing(df_daily, all_probs):
-    """PF(プロフィットファクター)およびリスクリワード比を追加算出する高度バックテスト"""
     trades = []
     fee = 0.002
     equity = 1.0
@@ -214,7 +214,6 @@ def run_backtest_with_trailing(df_daily, all_probs):
     win_rate = (len(wins) / len(trades)) * 100
     total_return = (np.prod([1 + t for t in trades]) - 1) * 100
     
-    # プロフィットファクター (PF) と リスクリワード比 (RR) の算定
     gross_profit = sum(wins) if wins else 0.0
     gross_loss = abs(sum(losses)) if losses else 0.0
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.9
@@ -223,7 +222,6 @@ def run_backtest_with_trailing(df_daily, all_probs):
     avg_loss = (abs(sum(losses)) / len(losses)) if losses else 0.0
     risk_reward = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.9
 
-    # 最大ドローダウンの算定
     peak = equity_curve[0]
     max_dd = 0.0
     for eq in equity_curve:
@@ -266,6 +264,7 @@ def save_log_to_csv(data_list):
             df_new.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
         else:
             df_new.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
+        print("CSV書き込み完了")
     except Exception as e:
         print(f"CSV保存エラー: {e}")
 
@@ -410,7 +409,7 @@ def analyze_and_notify():
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(完全要塞プロ版V4・高度アナリティクス): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(完全要塞プロ版V5・永続ログ対応): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
@@ -429,7 +428,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("完全要塞プロ版V4 通知成功＆高度指標CSV記録完了！")
+        print("完全要塞プロ版V5 通知＆CSV書き込み成功！")
     else:
         print(f"通知失敗: {response.status_code}")
 
