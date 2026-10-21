@@ -174,7 +174,7 @@ def process_features(df):
     return df
 
 def run_backtest_with_trailing(df_daily, all_probs):
-    """厳格な損切り・トレールに加え、最大ドローダウンを算出するバックテスト"""
+    """PF(プロフィットファクター)およびリスクリワード比を追加算出する高度バックテスト"""
     trades = []
     fee = 0.002
     equity = 1.0
@@ -203,13 +203,27 @@ def run_backtest_with_trailing(df_daily, all_probs):
             equity_curve.append(equity)
             
     if not trades:
-        return {"total_trades": 0, "win_rate": 0.0, "total_return": 0.0, "max_drawdown": 0.0}
+        return {
+            "total_trades": 0, "win_rate": 0.0, "total_return": 0.0, 
+            "max_drawdown": 0.0, "profit_factor": 0.0, "risk_reward": 0.0
+        }
         
     wins = [t for t in trades if t > 0]
+    losses = [t for t in trades if t < 0]
+    
     win_rate = (len(wins) / len(trades)) * 100
     total_return = (np.prod([1 + t for t in trades]) - 1) * 100
     
-    # 最大ドローダウン（最高値からの最大下落率）の算出
+    # プロフィットファクター (PF) と リスクリワード比 (RR) の算定
+    gross_profit = sum(wins) if wins else 0.0
+    gross_loss = abs(sum(losses)) if losses else 0.0
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.9
+
+    avg_win = (sum(wins) / len(wins)) if wins else 0.0
+    avg_loss = (abs(sum(losses)) / len(losses)) if losses else 0.0
+    risk_reward = round(avg_win / avg_loss, 2) if avg_loss > 0 else 99.9
+
+    # 最大ドローダウンの算定
     peak = equity_curve[0]
     max_dd = 0.0
     for eq in equity_curve:
@@ -224,11 +238,12 @@ def run_backtest_with_trailing(df_daily, all_probs):
         "total_trades": len(trades),
         "win_rate": round(win_rate, 1),
         "total_return": round(total_return, 1),
-        "max_drawdown": max_drawdown
+        "max_drawdown": max_drawdown,
+        "profit_factor": profit_factor,
+        "risk_reward": risk_reward
     }
 
 def save_log_to_csv(data_list):
-    """判定結果をCSVファイルに蓄積保存する関数"""
     csv_file = "bot_history_log.csv"
     rows = []
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -241,6 +256,8 @@ def save_log_to_csv(data_list):
             "WinRate": d["bt_win_rate"],
             "TotalReturn": d["bt_return"],
             "MaxDD": d["max_drawdown"],
+            "PF": d["profit_factor"],
+            "RR": d["risk_reward"],
             "Status": d["order_status"]
         })
     df_new = pd.DataFrame(rows)
@@ -332,6 +349,8 @@ def analyze_crypto(item, macro_score):
         "bt_win_rate": bt_result["win_rate"],
         "bt_return": bt_result["total_return"],
         "max_drawdown": bt_result["max_drawdown"],
+        "profit_factor": bt_result["profit_factor"],
+        "risk_reward": bt_result["risk_reward"],
         "order_status": order_status,
         "is_signal": is_strong_signal
     }
@@ -385,16 +404,16 @@ def analyze_and_notify():
                 {"name": "マルチタイム分析", "value": f"1H:{hourly_trend} / 15M:{m15_trend}", "inline": True},
                 {"name": "📈 過去検証(勝率/回数)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
                 {"name": "💰 過去通算リターン", "value": f"{data['bt_return']}%", "inline": True},
+                {"name": "⚖️ プロフィットファクター(PF)", "value": f"**{data['profit_factor']}** (RR: {data['risk_reward']})", "inline": True},
                 {"name": "📉 最大下落耐性(MaxDD)", "value": f"{data['max_drawdown']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(完全要塞プロ版V3): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(完全要塞プロ版V4・高度アナリティクス): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
-    # CSVへのログ保存を実行
     if all_results:
         save_log_to_csv(all_results)
 
@@ -410,7 +429,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("完全要塞プロ版V3 通知成功＆CSV記録完了！")
+        print("完全要塞プロ版V4 通知成功＆高度指標CSV記録完了！")
     else:
         print(f"通知失敗: {response.status_code}")
 
