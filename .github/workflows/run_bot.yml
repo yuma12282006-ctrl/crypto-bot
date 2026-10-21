@@ -2,18 +2,18 @@ name: Run Crypto Bot
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 毎日日本時間8:00 (UTC 23:00) に実行
-  workflow_dispatch:      # 手動実行ボタンを有効化
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
@@ -25,5 +25,6 @@ jobs:
       - name: Run bot script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          python bot_test.py
+          EXCHANGE_API_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EXCHANGE_API_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
+        run: python bot_test.py
