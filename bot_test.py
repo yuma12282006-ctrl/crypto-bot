@@ -34,7 +34,6 @@ def send_line_notify(message):
         print(f"LINE通知エラー: {e}")
 
 def send_discord_error(error_msg):
-    """エラー発生時にDiscordへ緊急通知を送る関数"""
     if not DISCORD_WEBHOOK_URL:
         return
     try:
@@ -42,7 +41,7 @@ def send_discord_error(error_msg):
             "content": "🚨 **【要塞システム・緊急エラー警報】** エラーが発生しました！確認してください。 @here",
             "embeds": [{
                 "title": "⚠️ クラッシュ・例外エラー発生",
-                "color": 15158332, # 赤色
+                "color": 15158332,
                 "fields": [{"name": "エラー詳細", "value": f"```{error_msg[:1000]}```", "inline": False}],
                 "footer": {"text": f"発生日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
             }]
@@ -52,7 +51,6 @@ def send_discord_error(error_msg):
         print(f"Discordエラー通知送信失敗: {e}")
 
 def fetch_bitflyer_balance_info():
-    """bitFlyerの口座残高と保有資産の評価額を取得"""
     if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
         return "💡 API未設定 (シミュレーションモード稼働中)"
 
@@ -65,7 +63,6 @@ def fetch_bitflyer_balance_info():
         balance = exchange.fetch_balance()
         jpy_cash = balance['total'].get('JPY', 0.0)
         
-        # 主要暗号資産の評価額を試算
         total_asset_jpy = jpy_cash
         assets_detail = []
         
@@ -86,10 +83,9 @@ def fetch_bitflyer_balance_info():
         return f"残高取得エラー: {str(e)[:30]}"
 
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
-    """Yahoo Financeからローソク足データを取得（15m, 1h, 1d対応）"""
     try:
         if timeframe == '1d':
-            interval, range_val = '1d', '120d'
+            interval, range_val = '1d', '180d' # バックテスト用に少し長め(180日)に取得
         elif timeframe == '1h':
             interval, range_val = '1h', '14d'
         elif timeframe == '15m':
@@ -111,7 +107,6 @@ def fetch_chart_data(yf_symbol, timeframe, limit=120):
         return None
 
 def fetch_macro_data():
-    """世界経済指標（ドル円・S&P500）を取得"""
     try:
         usdjpy = fetch_chart_data("USDJPY=X", "1d", limit=30)
         sp500 = fetch_chart_data("^GSPC", "1d", limit=30)
@@ -129,7 +124,6 @@ def fetch_macro_data():
         return 1
 
 def execute_bitflyer_order(symbol, amount_jpy=1000):
-    """国内bitFlyerへの実発注関数"""
     if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
         return "APIキー未設定のためシミュレーション完了"
 
@@ -150,7 +144,7 @@ def execute_bitflyer_order(symbol, amount_jpy=1000):
         else:
             amount = round(max(raw_amount, 1.0), 1)
 
-        return f"API接続OK / 攻め発注スタンバイ完了 (数量: {amount})"
+        return f"API接続OK / 発注スタンバイ (数量: {amount})"
     except Exception as e:
         return f"国内API確認中: {str(e)[:35]}"
 
@@ -180,8 +174,9 @@ def process_features(df):
     return df
 
 def run_backtest_with_trailing(df_daily, signals):
+    """厳格な損切り(-3%)とトレーリングストップ検証を含む本格バックテスト"""
     trades = []
-    fee = 0.002
+    fee = 0.002 # 取引手数料0.2%想定
     for i in range(len(signals) - 1):
         if signals[i] == 1:
             buy_price = df_daily['Close'].iloc[i]
@@ -215,7 +210,7 @@ def analyze_crypto(item, macro_score):
     symbol = item["symbol"]
     yf_symbol = item["yf"]
     
-    df_daily = fetch_chart_data(yf_symbol, "1d", limit=120)
+    df_daily = fetch_chart_data(yf_symbol, "1d", limit=150)
     df_1h = fetch_chart_data(yf_symbol, "1h", limit=168)
     df_15m = fetch_chart_data(yf_symbol, "15m", limit=96)
     
@@ -258,6 +253,9 @@ def analyze_crypto(item, macro_score):
     signals = [1 if p >= 53.0 and r <= 55 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
     bt_result = run_backtest_with_trailing(df_clean, signals)
 
+    # ログへの詳細出力（バックテスト結果の可視化）
+    print(f"【バックテスト完了】 {symbol} -> 試行回数: {bt_result['total_trades']}回 | 勝率: {bt_result['win_rate']}% | 通算収益率: {bt_result['total_return']}%")
+
     current_price = df_clean['Close'].iloc[-1]
     rsi = df_clean['RSI'].iloc[-1]
     bb_upper = df_clean['BB_Upper'].iloc[-1]
@@ -297,7 +295,7 @@ def analyze_crypto(item, macro_score):
 
 def analyze_and_notify():
     macro_score = fetch_macro_data()
-    balance_info = fetch_bitflyer_balance_info() # リアル口座残高の取得
+    balance_info = fetch_bitflyer_balance_info()
     embeds = []
     has_strong_signal = False
     
@@ -340,13 +338,13 @@ def analyze_and_notify():
                 {"name": "現在価格", "value": f"¥{price:,.2f}", "inline": True},
                 {"name": "日足AI予測(マイルド)", "value": f"{ai_prob}%", "inline": True},
                 {"name": "マルチタイム分析", "value": f"1H:{hourly_trend} / 15M:{m15_trend}", "inline": True},
-                {"name": "📈 アグレッシブ検証(勝率)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
-                {"name": "💰 通算リターン", "value": f"{data['bt_return']}%", "inline": True},
+                {"name": "📈 過去検証(勝率/回数)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
+                {"name": "💰 過去通算リターン", "value": f"{data['bt_return']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(アグレッシブ要塞プロ版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(バックテスト強化版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
@@ -362,7 +360,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("アグレッシブ版 通知成功！")
+        print("バックテスト結果付きDiscord通知成功！")
     else:
         print(f"通知失敗: {response.status_code}")
 
