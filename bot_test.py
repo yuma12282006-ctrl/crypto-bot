@@ -174,15 +174,16 @@ def process_features(df):
     return df
 
 def run_backtest_with_trailing(df_daily, all_probs):
-    """過去の全データに対してトレードシミュレーションを実行する修正版"""
+    """厳格な損切り・トレールに加え、最大ドローダウンを算出するバックテスト"""
     trades = []
-    fee = 0.002 # 取引手数料0.2%
+    fee = 0.002
+    equity = 1.0
+    equity_curve = [1.0]
     
     for i in range(len(all_probs) - 1):
         prob = all_probs[i]
         rsi = df_daily['RSI'].iloc[i]
         
-        # バックテスト側でも確率50%以上かつRSIが極端に高くない場合にエントリー判定を発生させる
         if prob >= 50.0 and rsi <= 60:
             buy_price = df_daily['Close'].iloc[i]
             next_price = df_daily['Close'].iloc[i + 1]
@@ -198,18 +199,58 @@ def run_backtest_with_trailing(df_daily, all_probs):
 
             net_ret = ret - fee
             trades.append(net_ret)
+            equity *= (1 + net_ret)
+            equity_curve.append(equity)
             
     if not trades:
-        return {"total_trades": 0, "win_rate": 0.0, "total_return": 0.0}
+        return {"total_trades": 0, "win_rate": 0.0, "total_return": 0.0, "max_drawdown": 0.0}
         
     wins = [t for t in trades if t > 0]
     win_rate = (len(wins) / len(trades)) * 100
     total_return = (np.prod([1 + t for t in trades]) - 1) * 100
+    
+    # 最大ドローダウン（最高値からの最大下落率）の算出
+    peak = equity_curve[0]
+    max_dd = 0.0
+    for eq in equity_curve:
+        if eq > peak:
+            peak = eq
+        dd = (eq - peak) / peak
+        if dd < max_dd:
+            max_dd = dd
+    max_drawdown = round(max_dd * 100, 1)
+    
     return {
         "total_trades": len(trades),
         "win_rate": round(win_rate, 1),
-        "total_return": round(total_return, 1)
+        "total_return": round(total_return, 1),
+        "max_drawdown": max_drawdown
     }
+
+def save_log_to_csv(data_list):
+    """判定結果をCSVファイルに蓄積保存する関数"""
+    csv_file = "bot_history_log.csv"
+    rows = []
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+    for d in data_list:
+        rows.append({
+            "Datetime": now_str,
+            "Symbol": d["symbol"],
+            "Price": d["price"],
+            "AI_Prob": d["ai_prob"],
+            "WinRate": d["bt_win_rate"],
+            "TotalReturn": d["bt_return"],
+            "MaxDD": d["max_drawdown"],
+            "Status": d["order_status"]
+        })
+    df_new = pd.DataFrame(rows)
+    try:
+        if os.path.exists(csv_file):
+            df_new.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
+        else:
+            df_new.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        print(f"CSV保存エラー: {e}")
 
 def analyze_crypto(item, macro_score):
     symbol = item["symbol"]
@@ -290,6 +331,7 @@ def analyze_crypto(item, macro_score):
         "bt_trades": bt_result["total_trades"],
         "bt_win_rate": bt_result["win_rate"],
         "bt_return": bt_result["total_return"],
+        "max_drawdown": bt_result["max_drawdown"],
         "order_status": order_status,
         "is_signal": is_strong_signal
     }
@@ -298,12 +340,14 @@ def analyze_and_notify():
     macro_score = fetch_macro_data()
     balance_info = fetch_bitflyer_balance_info()
     embeds = []
+    all_results = []
     has_strong_signal = False
     
     for item in SYMBOLS:
         data = analyze_crypto(item, macro_score)
         if not data:
             continue
+        all_results.append(data)
             
         symbol = data["symbol"]
         price = data["price"]
@@ -341,13 +385,18 @@ def analyze_and_notify():
                 {"name": "マルチタイム分析", "value": f"1H:{hourly_trend} / 15M:{m15_trend}", "inline": True},
                 {"name": "📈 過去検証(勝率/回数)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
                 {"name": "💰 過去通算リターン", "value": f"{data['bt_return']}%", "inline": True},
+                {"name": "📉 最大下落耐性(MaxDD)", "value": f"{data['max_drawdown']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(バックテスト修正版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(完全要塞プロ版V3): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
+
+    # CSVへのログ保存を実行
+    if all_results:
+        save_log_to_csv(all_results)
 
     if not embeds:
         print("有効なデータがありませんでした")
@@ -361,7 +410,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("バックテスト修正版 通知成功！")
+        print("完全要塞プロ版V3 通知成功＆CSV記録完了！")
     else:
         print(f"通知失敗: {response.status_code}")
 
