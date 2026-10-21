@@ -22,10 +22,17 @@ SYMBOLS = [
 ]
 
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
-    """Yahoo Financeからローソク足データを取得"""
+    """Yahoo Financeからローソク足データを取得（15m, 1h, 1d対応）"""
     try:
-        interval = '1d' if timeframe == '1d' else '1h'
-        range_val = '120d' if timeframe == '1d' else '30d'
+        if timeframe == '1d':
+            interval, range_val = '1d', '120d'
+        elif timeframe == '1h':
+            interval, range_val = '1h', '14d'
+        elif timeframe == '15m':
+            interval, range_val = '15m', '5d'
+        else:
+            interval, range_val = '1h', '7d'
+
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval={interval}&range={range_val}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         data = res.json()['chart']['result'][0]
@@ -34,35 +41,28 @@ def fetch_chart_data(yf_symbol, timeframe, limit=120):
         volumes = data['indicators']['quote'][0]['volume']
         
         df = pd.DataFrame({'Close': prices, 'Volume': volumes}).dropna()
-        
-        if timeframe == '4h':
-            df['Group'] = np.arange(len(df)) // 4
-            df = df.groupby('Group').agg({'Close': 'last', 'Volume': 'sum'}).reset_index(drop=True)
-            
         return df
     except Exception as e:
         print(f"[{yf_symbol}] データ取得エラー({timeframe}): {e}")
         return None
 
 def fetch_macro_data():
-    """世界経済指標（ドル円・S&P500）を取得してトレンドを分析"""
+    """世界経済指標（ドル円・S&P500）を取得"""
     try:
-        # ドル円とS&P500のデータを取得
         usdjpy = fetch_chart_data("USDJPY=X", "1d", limit=30)
         sp500 = fetch_chart_data("^GSPC", "1d", limit=30)
         
         macro_score = 0
         if usdjpy is not None and len(usdjpy) > 5:
-            # 直近の価格がSMA5より上ならプラス
             if usdjpy['Close'].iloc[-1] > usdjpy['Close'].rolling(5).mean().iloc[-1]:
                 macro_score += 1
         if sp500 is not None and len(sp500) > 5:
             if sp500['Close'].iloc[-1] > sp500['Close'].rolling(5).mean().iloc[-1]:
                 macro_score += 1
                 
-        return macro_score # 0〜2 (2なら世界経済リスクオン)
+        return macro_score
     except Exception:
-        return 1 # 取得失敗時は中立
+        return 1
 
 def execute_bitflyer_order(symbol, amount_jpy=1000):
     """国内bitFlyerへの実発注関数"""
@@ -86,7 +86,7 @@ def execute_bitflyer_order(symbol, amount_jpy=1000):
         else:
             amount = round(max(raw_amount, 1.0), 1)
 
-        return f"API接続OK / 発注スタンバイ完了 (数量: {amount})"
+        return f"API接続OK / 攻め発注スタンバイ完了 (数量: {amount})"
     except Exception as e:
         return f"国内API確認中: {str(e)[:35]}"
 
@@ -164,21 +164,19 @@ def analyze_crypto(item, macro_score):
     
     df_daily = fetch_chart_data(yf_symbol, "1d", limit=120)
     df_1h = fetch_chart_data(yf_symbol, "1h", limit=168)
+    df_15m = fetch_chart_data(yf_symbol, "15m", limit=96) # 15分足（直近24時間分）
     
     if df_daily is None or len(df_daily) < 40:
         return None
 
     df_daily = process_features(df_daily)
-    # マクロ経済スコアを特徴量として全行に結合
     df_daily['Macro_Score'] = macro_score
-    
     df_daily['Target'] = (df_daily['Close'].shift(-1) > df_daily['Close']).astype(int)
     df_clean = df_daily.dropna()
     
     if len(df_clean) < 25:
         return None
 
-    # AIの学習特徴量にマクロ経済スコアを追加！
     features = ['RSI', 'Return', 'SMA_Diff', 'Volume_Change', 'MACD_Diff', 'BB_Width', 'Macro_Score']
     X = df_clean[features].iloc[:-1]
     y = df_clean['Target'].iloc[:-1]
@@ -189,15 +187,25 @@ def analyze_crypto(item, macro_score):
     latest_X = df_clean[features].iloc[[-1]]
     prob_daily = model.predict_proba(latest_X)[0][1] * 100
 
+    # 1時間足トレンド
     hourly_trend = "不明"
     if df_1h is not None and len(df_1h) >= 20:
         df_1h['SMA20'] = df_1h['Close'].rolling(window=20).mean()
         latest_1h_close = df_1h['Close'].iloc[-1]
         latest_1h_sma = df_1h['SMA20'].iloc[-1]
-        hourly_trend = "上昇（SMA20の上）" if latest_1h_close > latest_1h_sma else "下降（SMA20の下）"
+        hourly_trend = "上昇" if latest_1h_close > latest_1h_sma else "下降"
+
+    # 15分足短期トレンド（押し目検知用）
+    m15_trend = "不明"
+    if df_15m is not None and len(df_15m) >= 20:
+        df_15m['SMA20'] = df_15m['Close'].rolling(window=20).mean()
+        latest_15m_close = df_15m['Close'].iloc[-1]
+        latest_15m_sma = df_15m['SMA20'].iloc[-1]
+        m15_trend = "短期上昇" if latest_15m_close > latest_15m_sma else "短期押し目"
 
     all_probs = model.predict_proba(df_clean[features])[:, 1]
-    signals = [1 if p >= 58.0 and r <= 50 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
+    # バックテスト用シグナル閾値も53%へマイルド化
+    signals = [1 if p >= 53.0 and r <= 55 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
     bt_result = run_backtest_with_trailing(df_clean, signals)
 
     current_price = df_clean['Close'].iloc[-1]
@@ -207,19 +215,20 @@ def analyze_crypto(item, macro_score):
     stop_loss = current_price * 0.97
     trailing_target = current_price * 1.025
 
-    # 【世界経済連動・超強固フィルター】マクロが強気(>=1)のときを優遇
+    # 【アグレッシブ攻め仕様フィルター】
+    # AI確率53%以上 ＋ (1時間足上昇 OR 15分足短期上昇) ＋ RSI55以下 ＋ マクロ1以上
     is_strong_signal = (
-        prob_daily >= 58.0 and 
-        "上昇" in hourly_trend and 
+        prob_daily >= 53.0 and 
+        ("上昇" in hourly_trend or "上昇" in m15_trend) and 
         macro_score >= 1 and 
-        rsi <= 50 and 
+        rsi <= 55 and 
         current_price <= bb_upper
     )
 
     order_status = "見送り"
     if is_strong_signal:
         order_status = execute_bitflyer_order(symbol, amount_jpy=1000)
-        send_line_notify(f"\n🌐【世界連動要塞シグナル】\n銘柄: {symbol}\n価格: ¥{current_price:,.0f}\nAI確率: {prob_daily}%\nマクロ環境: 良好(スコア{macro_score})")
+        send_line_notify(f"\n🔥【アグレッシブシグナル点灯】\n銘柄: {symbol}\n価格: ¥{current_price:,.0f}\nAI確率: {prob_daily}%\n15m状態: {m15_trend}")
 
     return {
         "symbol": symbol,
@@ -227,6 +236,7 @@ def analyze_crypto(item, macro_score):
         "rsi": round(rsi, 1),
         "ai_prob": round(prob_daily, 1),
         "hourly_trend": hourly_trend,
+        "m15_trend": m15_trend,
         "macro_score": macro_score,
         "stop_loss": round(stop_loss, 2),
         "trailing_target": round(trailing_target, 2),
@@ -252,40 +262,41 @@ def analyze_and_notify():
         rsi = data["rsi"]
         ai_prob = data["ai_prob"]
         hourly_trend = data["hourly_trend"]
+        m15_trend = data["m15_trend"]
         stop_loss = data["stop_loss"]
         trailing_target = data["trailing_target"]
         order_status = data["order_status"]
         
         if data["is_signal"]:
             has_strong_signal = True
-            signal = "🌐🚀 【世界連動・要塞AI強気シグナル】"
+            signal = "🔥🚀 【アグレッシブ要塞・攻め買いシグナル】"
             trade_action = f"⚡ {order_status}"
             color = 3066993
-        elif ai_prob <= 42.0 or "下降" in hourly_trend or macro_score == 0:
-            signal = "🌐⚠️ 【要塞防御・マクロ警戒見送り】"
-            trade_action = "世界経済またはトレンド不一致"
+        elif ai_prob <= 42.0 or macro_score == 0:
+            signal = "🛡️⚠️ 【要塞防御・マクロ警戒見送り】"
+            trade_action = "世界経済またはAI確率低下により見送り"
             color = 15158332
         else:
-            signal = "⚡⚖️ 【中立・様子見】"
-            trade_action = "明確なシグナルなし"
+            signal = "⚡⚖️ 【中立・タイミング待ち】"
+            trade_action = "明確なエントリー条件未達"
             color = 3447003
 
         embed = {
-            "title": f"🇯🇵 世界経済連動アナリティクス: {symbol}",
+            "title": f"🇯🇵 アグレッシブ連動アナリティクス: {symbol}",
             "color": color,
             "fields": [
                 {"name": "判定シグナル", "value": signal, "inline": False},
                 {"name": "自動売買アクション", "value": trade_action, "inline": False},
                 {"name": "現在価格", "value": f"¥{price:,.2f}", "inline": True},
-                {"name": "日足AI予測(世界経済込)", "value": f"{ai_prob}%", "inline": True},
-                {"name": "世界経済マクロ環境", "value": f"スコア: {macro_score}/2 (米株・為替連動)", "inline": True},
-                {"name": "📈 追従検証(勝率・手数料込)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
+                {"name": "日足AI予測(マイルド)", "value": f"{ai_prob}%", "inline": True},
+                {"name": "マルチタイム分析", "value": f"1H:{hourly_trend} / 15M:{m15_trend}", "inline": True},
+                {"name": "📈 アグレッシブ検証(勝率)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
                 {"name": "💰 通算リターン", "value": f"{data['bt_return']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(世界経済連動プロ版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(アグレッシブ要塞プロ版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
@@ -293,7 +304,7 @@ def analyze_and_notify():
         print("有効なデータがありませんでした")
         return
 
-    content_msg = "🌐 **【世界経済要塞アラート】** グローバル市場連動の強気シグナルが点灯しました！ @here" if has_strong_signal else None
+    content_msg = "🔥 **【アグレッシブアラート】** 攻めのエントリーシグナルが点灯しました！ @here" if has_strong_signal else None
 
     payload = {"embeds": embeds[:10]}
     if content_msg:
@@ -301,7 +312,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("世界連動版 通知成功！")
+        print("アグレッシブ版 通知成功！")
     else:
         print(f"通知失敗: {response.status_code}")
 
