@@ -11,15 +11,17 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY")
 EXCHANGE_API_SECRET = os.environ.get("EXCHANGE_API_SECRET")
 
-# Yahoo Financeの日本円対応ティッカーを使用（安定性抜群）
+# 監視銘柄を5つに拡大（BTC, ETH, XRP, LTC, XLM）
 SYMBOLS = [
     {"symbol": "BTC/JPY", "yf": "BTC-JPY"},
     {"symbol": "ETH/JPY", "yf": "ETH-JPY"},
-    {"symbol": "XRP/JPY", "yf": "XRP-JPY"}
+    {"symbol": "XRP/JPY", "yf": "XRP-JPY"},
+    {"symbol": "LTC/JPY", "yf": "LTC-JPY"},
+    {"symbol": "XLM/JPY", "yf": "XLM-JPY"}
 ]
 
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
-    """Yahoo Financeから確実かつ安全にローソク足データを取得"""
+    """Yahoo Financeから安全にローソク足データを取得"""
     try:
         interval = '1d' if timeframe == '1d' else '1h'
         range_val = '120d' if timeframe == '1d' else '7d'
@@ -37,9 +39,9 @@ def fetch_chart_data(yf_symbol, timeframe, limit=120):
         return None
 
 def execute_bitflyer_order(symbol, amount_jpy=1000):
-    """国内bitFlyer発注テスト関数"""
+    """国内bitFlyerへの実発注関数（API準備中・接続確認対応）"""
     if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
-        return "APIキー未設定（国内シミュレーション完了）"
+        return "APIキー未設定のためシミュレーション完了"
 
     try:
         exchange = ccxt.bitflyer({
@@ -49,21 +51,40 @@ def execute_bitflyer_order(symbol, amount_jpy=1000):
         })
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
-        amount = round(amount_jpy / current_price, 4)
-        print(f"🔥【bitFlyer発注テスト成功】 銘柄: {symbol}, 数量: {amount}")
-        return f"bitFlyer発注テスト成功 (数量: {amount})"
+        raw_amount = amount_jpy / current_price
+        
+        if "BTC" in symbol:
+            amount = round(max(raw_amount, 0.001), 3)
+        elif "ETH" in symbol:
+            amount = round(max(raw_amount, 0.01), 2)
+        else:
+            amount = round(max(raw_amount, 1.0), 1)
+
+        # 本人確認完了後に実際に注文を出す場合は下のコメントアウトを外します
+        # order = exchange.create_market_buy_order(symbol, amount)
+        return f"API接続OK / 発注スタンバイ完了 (数量: {amount})"
+        
     except Exception as e:
-        return f"国内APIエラー: {str(e)[:30]}"
+        return f"国内APIエラー(審査中の可能性あり): {str(e)[:35]}"
 
 def process_features(df):
+    # 移動平均線
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     
+    # ボリンジャーバンド（新追加：バンド幅と価格の位置関係）
+    std20 = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['SMA20'] + (std20 * 2)
+    df['BB_Lower'] = df['SMA20'] - (std20 * 2)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA20']
+    
+    # RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
@@ -120,7 +141,8 @@ def analyze_crypto(item):
     if len(df_clean) < 25:
         return None
 
-    features = ['RSI', 'Return', 'SMA_Diff', 'Volume_Change', 'MACD_Diff']
+    # AIの学習特徴量にボリンジャーバンド幅を追加
+    features = ['RSI', 'Return', 'SMA_Diff', 'Volume_Change', 'MACD_Diff', 'BB_Width']
     X = df_clean[features].iloc[:-1]
     y = df_clean['Target'].iloc[:-1]
 
@@ -138,15 +160,18 @@ def analyze_crypto(item):
         hourly_trend = "上昇（SMA20の上）" if latest_1h_close > latest_1h_sma else "下降（SMA20の下）"
 
     all_probs = model.predict_proba(df_clean[features])[:, 1]
+    # バックテスト用シグナル条件
     signals = [1 if p >= 58.0 and r <= 50 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
     bt_result = run_backtest_with_fees(df_clean, signals)
 
     current_price = df_clean['Close'].iloc[-1]
     rsi = df_clean['RSI'].iloc[-1]
+    bb_upper = df_clean['BB_Upper'].iloc[-1]
     stop_loss = current_price * 0.97
     take_profit = current_price * 1.05
 
-    is_strong_signal = (prob_daily >= 58.0 and "上昇" in hourly_trend and rsi <= 50)
+    # プレミアム判定条件（AI確率58%以上 ＋ 1時間足上昇 ＋ RSI50以下 ＋ 価格がBB上限を超えていない安全圏）
+    is_strong_signal = (prob_daily >= 58.0 and "上昇" in hourly_trend and rsi <= 50 and current_price <= bb_upper)
 
     order_status = "見送り"
     if is_strong_signal:
@@ -197,21 +222,21 @@ def analyze_and_notify():
             color = 3447003
 
         embed = {
-            "title": f"🇯🇵 国内市場分析(JPY): {symbol}",
+            "title": f"🇯🇵 拡張市場分析(JPY): {symbol}",
             "color": color,
             "fields": [
                 {"name": "判定シグナル", "value": signal, "inline": False},
                 {"name": "自動売買アクション", "value": trade_action, "inline": False},
-                {"name": "現在価格", "value": f"¥{price:,.0f}", "inline": True},
-                {"name": "日足AI予測(LGBM)", "value": f"{ai_prob}%", "inline": True},
+                {"name": "現在価格", "value": f"¥{price:,.2f}", "inline": True},
+                {"name": "日足AI予測(LGBM+BB)", "value": f"{ai_prob}%", "inline": True},
                 {"name": "1時間足トレンド", "value": f"{hourly_trend}", "inline": True},
                 {"name": "📈 厳格検証(勝率・手数料込)", "value": f"{data['bt_win_rate']}% ({data['bt_trades']}回)", "inline": True},
                 {"name": "💰 手数料込 通算リターン", "value": f"{data['bt_return']}%", "inline": True},
                 {"name": "RSI (14)", "value": f"{rsi}", "inline": True},
-                {"name": "🛑 損切り (-3%)", "value": f"¥{stop_loss:,.0f}", "inline": True},
-                {"name": "🎯 利食い (+5%)", "value": f"¥{take_profit:,.0f}", "inline": True}
+                {"name": "🛑 損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
+                {"name": "🎯 利食い (+5%)", "value": f"¥{take_profit:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(全5銘柄拡張版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
