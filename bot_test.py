@@ -85,7 +85,7 @@ def fetch_bitflyer_balance_info():
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
     try:
         if timeframe == '1d':
-            interval, range_val = '1d', '180d' # バックテスト用に少し長め(180日)に取得
+            interval, range_val = '1d', '180d'
         elif timeframe == '1h':
             interval, range_val = '1h', '14d'
         elif timeframe == '15m':
@@ -173,12 +173,17 @@ def process_features(df):
     
     return df
 
-def run_backtest_with_trailing(df_daily, signals):
-    """厳格な損切り(-3%)とトレーリングストップ検証を含む本格バックテスト"""
+def run_backtest_with_trailing(df_daily, all_probs):
+    """過去の全データに対してトレードシミュレーションを実行する修正版"""
     trades = []
-    fee = 0.002 # 取引手数料0.2%想定
-    for i in range(len(signals) - 1):
-        if signals[i] == 1:
+    fee = 0.002 # 取引手数料0.2%
+    
+    for i in range(len(all_probs) - 1):
+        prob = all_probs[i]
+        rsi = df_daily['RSI'].iloc[i]
+        
+        # バックテスト側でも確率50%以上かつRSIが極端に高くない場合にエントリー判定を発生させる
+        if prob >= 50.0 and rsi <= 60:
             buy_price = df_daily['Close'].iloc[i]
             next_price = df_daily['Close'].iloc[i + 1]
             peak_price = max(buy_price, next_price)
@@ -249,12 +254,8 @@ def analyze_crypto(item, macro_score):
         latest_15m_sma = df_15m['SMA20'].iloc[-1]
         m15_trend = "短期上昇" if latest_15m_close > latest_15m_sma else "短期押し目"
 
-    all_probs = model.predict_proba(df_clean[features])[:, 1]
-    signals = [1 if p >= 53.0 and r <= 55 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
-    bt_result = run_backtest_with_trailing(df_clean, signals)
-
-    # ログへの詳細出力（バックテスト結果の可視化）
-    print(f"【バックテスト完了】 {symbol} -> 試行回数: {bt_result['total_trades']}回 | 勝率: {bt_result['win_rate']}% | 通算収益率: {bt_result['total_return']}%")
+    all_probs = model.predict_proba(df_clean[features])[:, 1] * 100
+    bt_result = run_backtest_with_trailing(df_clean, all_probs)
 
     current_price = df_clean['Close'].iloc[-1]
     rsi = df_clean['RSI'].iloc[-1]
@@ -344,7 +345,7 @@ def analyze_and_notify():
                 {"name": "🛑 防御損切り (-3%)", "value": f"¥{stop_loss:,.2f}", "inline": True},
                 {"name": "🔄 トレール起動地点", "value": f"¥{trailing_target:,.2f}", "inline": True}
             ],
-            "footer": {"text": f"実行日時(バックテスト強化版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            "footer": {"text": f"実行日時(バックテスト修正版): {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
         }
         embeds.append(embed)
 
@@ -360,7 +361,7 @@ def analyze_and_notify():
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if response.status_code == 204:
-        print("バックテスト結果付きDiscord通知成功！")
+        print("バックテスト修正版 通知成功！")
     else:
         print(f"通知失敗: {response.status_code}")
 
