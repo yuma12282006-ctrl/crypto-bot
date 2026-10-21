@@ -4,47 +4,40 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import lightgbm as lgb
-import ccxt  # bitFlyerなど主要取引所対応ライブラリ
+import ccxt
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# bitFlyer APIキー（GitHub Secretsから安全に取得）
 EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY")
 EXCHANGE_API_SECRET = os.environ.get("EXCHANGE_API_SECRET")
 
-# 国内取引所(bitFlyer)対応ペア
+# Yahoo Financeの日本円対応ティッカーを使用（安定性抜群）
 SYMBOLS = [
-    "BTC/JPY",
-    "ETH/JPY",
-    "XRP/JPY"
+    {"symbol": "BTC/JPY", "yf": "BTC-JPY"},
+    {"symbol": "ETH/JPY", "yf": "ETH-JPY"},
+    {"symbol": "XRP/JPY", "yf": "XRP-JPY"}
 ]
 
-def fetch_chart_data(symbol, timeframe, limit=120):
-    """ccxt経由でbitFlyer等のローソク足データを取得"""
+def fetch_chart_data(yf_symbol, timeframe, limit=120):
+    """Yahoo Financeから確実かつ安全にローソク足データを取得"""
     try:
-        exchange = ccxt.bitflyer()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if not ohlcv:
-            # 万が一取得できない場合はYahoo Financeでバックアップ
-            yf_symbol = symbol.replace("/", "-")
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval={'1d' if timeframe=='1d' else '1h'}&range={'120d' if timeframe=='1d' else '7d'}"
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            data = res.json()['chart']['result'][0]
-            prices = data['indicators']['quote'][0]['close']
-            volumes = data['indicators']['quote'][0]['volume']
-            df = pd.DataFrame({'Close': prices, 'Volume': volumes}).dropna()
-            return df
-
-        df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        interval = '1d' if timeframe == '1d' else '1h'
+        range_val = '120d' if timeframe == '1d' else '7d'
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}?interval={interval}&range={range_val}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        data = res.json()['chart']['result'][0]
+        
+        prices = data['indicators']['quote'][0]['close']
+        volumes = data['indicators']['quote'][0]['volume']
+        
+        df = pd.DataFrame({'Close': prices, 'Volume': volumes}).dropna()
         return df
     except Exception as e:
-        print(f"[{symbol}] {timeframe}データ取得失敗: {e}")
+        print(f"[{yf_symbol}] データ取得エラー: {e}")
         return None
 
 def execute_bitflyer_order(symbol, amount_jpy=1000):
-    """【国内bitFlyer自動発注テスト関数】
-       APIキーがSecretsに登録されている場合に国内APIを実行
-    """
+    """国内bitFlyer発注テスト関数"""
     if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
         return "APIキー未設定（国内シミュレーション完了）"
 
@@ -54,23 +47,15 @@ def execute_bitflyer_order(symbol, amount_jpy=1000):
             'secret': EXCHANGE_API_SECRET,
             'enableRateLimit': True,
         })
-        
-        # bitFlyer APIを使った自動発注処理
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
         amount = round(amount_jpy / current_price, 4)
-
-        # 成行買い注文 (例: BTC/JPY)
-        # order = exchange.create_market_buy_order(symbol, amount)
-        print(f"🔥【bitFlyer発注成功】 銘柄: {symbol}, 数量: {amount}, 約定価格: ¥{current_price:,.0f}")
+        print(f"🔥【bitFlyer発注テスト成功】 銘柄: {symbol}, 数量: {amount}")
         return f"bitFlyer発注テスト成功 (数量: {amount})"
-        
     except Exception as e:
-        print(f"❌ [{symbol}] bitFlyer発注エラー: {e}")
         return f"国内APIエラー: {str(e)[:30]}"
 
 def process_features(df):
-    """テクニカル指標と特徴量の生成"""
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     
     delta = df['Close'].diff()
@@ -92,21 +77,17 @@ def process_features(df):
     return df
 
 def run_backtest_with_fees(df_daily, signals):
-    """往復手数料0.2%込みバックテスト"""
     trades = []
     fee = 0.002
-    
     for i in range(len(signals) - 1):
         if signals[i] == 1:
             buy_price = df_daily['Close'].iloc[i]
             next_price = df_daily['Close'].iloc[i + 1]
             ret = (next_price - buy_price) / buy_price
-            
             if ret <= -0.03:
                 ret = -0.03
             elif ret >= 0.05:
                 ret = 0.05
-                
             net_ret = ret - fee
             trades.append(net_ret)
             
@@ -116,16 +97,18 @@ def run_backtest_with_fees(df_daily, signals):
     wins = [t for t in trades if t > 0]
     win_rate = (len(wins) / len(trades)) * 100
     total_return = (np.prod([1 + t for t in trades]) - 1) * 100
-    
     return {
         "total_trades": len(trades),
         "win_rate": round(win_rate, 1),
         "total_return": round(total_return, 1)
     }
 
-def analyze_crypto(symbol):
-    df_daily = fetch_chart_data(symbol, "1d", limit=120)
-    df_1h = fetch_chart_data(symbol, "1h", limit=168)
+def analyze_crypto(item):
+    symbol = item["symbol"]
+    yf_symbol = item["yf"]
+    
+    df_daily = fetch_chart_data(yf_symbol, "1d", limit=120)
+    df_1h = fetch_chart_data(yf_symbol, "1h", limit=168)
     
     if df_daily is None or len(df_daily) < 40:
         return None
@@ -165,7 +148,6 @@ def analyze_crypto(symbol):
 
     is_strong_signal = (prob_daily >= 58.0 and "上昇" in hourly_trend and rsi <= 50)
 
-    # 買いシグナルが出たら国内bitFlyerテスト発注
     order_status = "見送り"
     if is_strong_signal:
         order_status = execute_bitflyer_order(symbol, amount_jpy=1000)
@@ -187,12 +169,12 @@ def analyze_crypto(symbol):
 
 def analyze_and_notify():
     embeds = []
-    
-    for symbol in SYMBOLS:
-        data = analyze_crypto(symbol)
+    for item in SYMBOLS:
+        data = analyze_crypto(item)
         if not data:
             continue
             
+        symbol = data["symbol"]
         price = data["price"]
         rsi = data["rsi"]
         ai_prob = data["ai_prob"]
@@ -202,20 +184,20 @@ def analyze_and_notify():
         order_status = data["order_status"]
         
         if data["is_signal"]:
-            signal = f"🏰🚀 【要塞級AI強気買いシグナル発動】"
+            signal = "🏰🚀 【要塞級AI強気買いシグナル発動】"
             trade_action = f"⚡ {order_status}"
-            color = 3066993  # 緑
+            color = 3066993
         elif ai_prob <= 42.0 or "下降" in hourly_trend:
-            signal = f"⚡⚠️ 【要塞防御・様子見推奨】"
-            trade_action = f"トレンド不一致のため見送り"
-            color = 15158332 # 赤
+            signal = "⚡⚠️ 【要塞防御・様子見推奨】"
+            trade_action = "トレンド不一致のため見送り"
+            color = 15158332
         else:
-            signal = f"⚡⚖️ 【中立・様子見】"
-            trade_action = f"明確なシグナルなし"
-            color = 3447003  # 青
+            signal = "⚡⚖️ 【中立・様子見】"
+            trade_action = "明確なシグナルなし"
+            color = 3447003
 
         embed = {
-            "title": f"🇯🇵 国内取引所(bitFlyer)分析: {symbol}",
+            "title": f"🇯🇵 国内市場分析(JPY): {symbol}",
             "color": color,
             "fields": [
                 {"name": "判定シグナル", "value": signal, "inline": False},
@@ -234,7 +216,7 @@ def analyze_and_notify():
         embeds.append(embed)
 
     if not embeds:
-        print("データなし")
+        print("有効なデータがありませんでした")
         return
 
     payload = {"embeds": embeds[:10]}
