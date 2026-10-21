@@ -51,6 +51,40 @@ def send_discord_error(error_msg):
     except Exception as e:
         print(f"Discordエラー通知送信失敗: {e}")
 
+def fetch_bitflyer_balance_info():
+    """bitFlyerの口座残高と保有資産の評価額を取得"""
+    if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
+        return "💡 API未設定 (シミュレーションモード稼働中)"
+
+    try:
+        exchange = ccxt.bitflyer({
+            'apiKey': EXCHANGE_API_KEY,
+            'secret': EXCHANGE_API_SECRET,
+            'enableRateLimit': True,
+        })
+        balance = exchange.fetch_balance()
+        jpy_cash = balance['total'].get('JPY', 0.0)
+        
+        # 主要暗号資産の評価額を試算
+        total_asset_jpy = jpy_cash
+        assets_detail = []
+        
+        for curr, amount in balance['total'].items():
+            if curr != 'JPY' and amount > 0:
+                try:
+                    ticker = exchange.fetch_ticker(f"{curr}/JPY")
+                    price = ticker['last']
+                    val = amount * price
+                    total_asset_jpy += val
+                    assets_detail.append(f"{curr}: {amount:.4f} (約¥{val:,.0f})")
+                except Exception:
+                    pass
+                    
+        detail_str = f" [現金: ¥{jpy_cash:,.0f}]" if assets_detail else ""
+        return f"¥{total_asset_jpy:,.0f}{detail_str}"
+    except Exception as e:
+        return f"残高取得エラー: {str(e)[:30]}"
+
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
     """Yahoo Financeからローソク足データを取得（15m, 1h, 1d対応）"""
     try:
@@ -263,6 +297,7 @@ def analyze_crypto(item, macro_score):
 
 def analyze_and_notify():
     macro_score = fetch_macro_data()
+    balance_info = fetch_bitflyer_balance_info() # リアル口座残高の取得
     embeds = []
     has_strong_signal = False
     
@@ -299,6 +334,7 @@ def analyze_and_notify():
             "title": f"🇯🇵 アグレッシブ連動アナリティクス: {symbol}",
             "color": color,
             "fields": [
+                {"name": "💰 口座総資産(bitFlyer)", "value": f"**{balance_info}**", "inline": False},
                 {"name": "判定シグナル", "value": signal, "inline": False},
                 {"name": "自動売買アクション", "value": trade_action, "inline": False},
                 {"name": "現在価格", "value": f"¥{price:,.2f}", "inline": True},
@@ -334,7 +370,6 @@ if __name__ == "__main__":
     try:
         analyze_and_notify()
     except Exception as e:
-        # 予期せぬクラッシュが起きた場合、詳細をDiscordへ即座に飛ばす！
         error_trace = traceback.format_exc()
         print(f"致命的エラー発生: {error_trace}")
         send_discord_error(error_trace)
