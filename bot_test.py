@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import lightgbm as lgb
 import ccxt
+import traceback
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 LINE_NOTIFY_TOKEN = os.environ.get("LINE_NOTIFY_TOKEN")
@@ -20,6 +21,35 @@ SYMBOLS = [
     {"symbol": "LTC/JPY", "yf": "LTC-JPY"},
     {"symbol": "XLM/JPY", "yf": "XLM-JPY"}
 ]
+
+def send_line_notify(message):
+    if not LINE_NOTIFY_TOKEN:
+        return
+    try:
+        url = "https://notify-api.line.me/api/notify"
+        headers = {"Authorization": f"Bearer {LINE_NOTIFY_TOKEN}"}
+        payload = {"message": message}
+        requests.post(url, headers=headers, data=payload, timeout=5)
+    except Exception as e:
+        print(f"LINE通知エラー: {e}")
+
+def send_discord_error(error_msg):
+    """エラー発生時にDiscordへ緊急通知を送る関数"""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        payload = {
+            "content": "🚨 **【要塞システム・緊急エラー警報】** エラーが発生しました！確認してください。 @here",
+            "embeds": [{
+                "title": "⚠️ クラッシュ・例外エラー発生",
+                "color": 15158332, # 赤色
+                "fields": [{"name": "エラー詳細", "value": f"```{error_msg[:1000]}```", "inline": False}],
+                "footer": {"text": f"発生日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+            }]
+        }
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Discordエラー通知送信失敗: {e}")
 
 def fetch_chart_data(yf_symbol, timeframe, limit=120):
     """Yahoo Financeからローソク足データを取得（15m, 1h, 1d対応）"""
@@ -90,17 +120,6 @@ def execute_bitflyer_order(symbol, amount_jpy=1000):
     except Exception as e:
         return f"国内API確認中: {str(e)[:35]}"
 
-def send_line_notify(message):
-    if not LINE_NOTIFY_TOKEN:
-        return
-    try:
-        url = "https://notify-api.line.me/api/notify"
-        headers = {"Authorization": f"Bearer {LINE_NOTIFY_TOKEN}"}
-        payload = {"message": message}
-        requests.post(url, headers=headers, data=payload, timeout=5)
-    except Exception as e:
-        print(f"LINE通知エラー: {e}")
-
 def process_features(df):
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     std20 = df['Close'].rolling(window=20).std()
@@ -164,7 +183,7 @@ def analyze_crypto(item, macro_score):
     
     df_daily = fetch_chart_data(yf_symbol, "1d", limit=120)
     df_1h = fetch_chart_data(yf_symbol, "1h", limit=168)
-    df_15m = fetch_chart_data(yf_symbol, "15m", limit=96) # 15分足（直近24時間分）
+    df_15m = fetch_chart_data(yf_symbol, "15m", limit=96)
     
     if df_daily is None or len(df_daily) < 40:
         return None
@@ -187,7 +206,6 @@ def analyze_crypto(item, macro_score):
     latest_X = df_clean[features].iloc[[-1]]
     prob_daily = model.predict_proba(latest_X)[0][1] * 100
 
-    # 1時間足トレンド
     hourly_trend = "不明"
     if df_1h is not None and len(df_1h) >= 20:
         df_1h['SMA20'] = df_1h['Close'].rolling(window=20).mean()
@@ -195,7 +213,6 @@ def analyze_crypto(item, macro_score):
         latest_1h_sma = df_1h['SMA20'].iloc[-1]
         hourly_trend = "上昇" if latest_1h_close > latest_1h_sma else "下降"
 
-    # 15分足短期トレンド（押し目検知用）
     m15_trend = "不明"
     if df_15m is not None and len(df_15m) >= 20:
         df_15m['SMA20'] = df_15m['Close'].rolling(window=20).mean()
@@ -204,7 +221,6 @@ def analyze_crypto(item, macro_score):
         m15_trend = "短期上昇" if latest_15m_close > latest_15m_sma else "短期押し目"
 
     all_probs = model.predict_proba(df_clean[features])[:, 1]
-    # バックテスト用シグナル閾値も53%へマイルド化
     signals = [1 if p >= 53.0 and r <= 55 else 0 for p, r in zip(all_probs, df_clean['RSI'])]
     bt_result = run_backtest_with_trailing(df_clean, signals)
 
@@ -215,8 +231,6 @@ def analyze_crypto(item, macro_score):
     stop_loss = current_price * 0.97
     trailing_target = current_price * 1.025
 
-    # 【アグレッシブ攻め仕様フィルター】
-    # AI確率53%以上 ＋ (1時間足上昇 OR 15分足短期上昇) ＋ RSI55以下 ＋ マクロ1以上
     is_strong_signal = (
         prob_daily >= 53.0 and 
         ("上昇" in hourly_trend or "上昇" in m15_trend) and 
@@ -317,4 +331,12 @@ def analyze_and_notify():
         print(f"通知失敗: {response.status_code}")
 
 if __name__ == "__main__":
-    analyze_and_notify()
+    try:
+        analyze_and_notify()
+    except Exception as e:
+        # 予期せぬクラッシュが起きた場合、詳細をDiscordへ即座に飛ばす！
+        error_trace = traceback.format_exc()
+        print(f"致命的エラー発生: {error_trace}")
+        send_discord_error(error_trace)
+        send_line_notify(f"🚨【要塞システム緊急停止】エラーが発生しました。詳細はDiscordを確認してください。")
+        raise e
